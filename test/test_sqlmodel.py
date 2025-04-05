@@ -1,5 +1,9 @@
+import random
+
 from sqlalchemy import create_engine, text
-from sqlmodel import SQLModel, Session
+from sqlmodel import SQLModel, Session, select
+
+from model.player import Player
 
 DB_PATH = './data/data.db'
 
@@ -15,8 +19,22 @@ def get_session():
 
 session = next(get_session())
 
-session.exec(text("UPDATE player SET gold = 1000 WHERE name = '뉴뉴큥'"))
+target_player = session.exec(
+    select(Player).where(Player.name == '뉴뉴큥')
+).first()
 
-session.commit()
+property_key: str = 'stat_strength'
 
-print('완료')
+player_stat = getattr(target_player, property_key)
+
+if player_stat >= 15:
+    print('성공')
+
+lack_stat = 15 - player_stat
+
+random_value = random.randint(0, 9)
+
+if random_value < lack_stat:
+    print('실패')
+
+print('성공')
