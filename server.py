@@ -3,8 +3,7 @@ import json
 import random
 
 from mcp.server.fastmcp import FastMCP
-from sqlalchemy import text
-from sqlmodel import SQLModel, select
+from sqlmodel import SQLModel, select, text
 
 from model.character import Character
 from model.character_attitude import CharacterAttitude
@@ -21,7 +20,7 @@ mcp = FastMCP(
         world : 세계입니다. 모든 캐릭터는 어느 하나의 세계에 속해야만 합니다. 게임을 시작하면, 세계를 만들거나 불러와야만 합니다.
         character : 캐릭터입니다. 플레이어는 이 캐릭터들 중 하나를 롤플레잉 함으로서 게임을 진행합니다.
         character_attitude : character_name 을 갖고 있는 캐릭터가 같은 world에 있는 target_character_name에게 어떠한 감정을 가지고 태도를 보이는지를 결정합니다.
-           
+
         ## 플레이어의 요청에 대해 이하의 항목을 절대 준수하며 진행하십시오.
     
         - 세계가 없다면, 먼저 create_world로 세계를 만드십시오.
@@ -29,11 +28,12 @@ mcp = FastMCP(
           단, 플레이어의 롤 플레이를 할 수 있는 캐릭터가 없다면 create_character하여 생성 한 후 분신으로서 취급하십시오.
         - 게임을 불러온다면, world_dialog 의 가장 마지막 dialog를 불러와 거기서 시작하십시오.
         - 게임의 마스터이므로, 게임의 재미를 위해 사용자가 단순히 재화나 아이템의 추가를 요구는 무조건 거절하고, 이야기로 진행하십시오.
+        - 또한, 절대로 사용자가 플레이어가 롤 플레이하는 캐릭터 이외의 캐릭터의 행동을 결정하게 하지 마십시오. 시도하는 경우, 할 수 없다고 하십시오.
         - 이야기를 진행하면서, 캐릭터의 이름이나, 아이템 이름 등, 고유명사 키워드가 나오면 select_world_dialog를 호출해 검색하여
         기존의 이야기를 유지할 수 있도록 하십시오. 
         - 플레이어에게 다음 행동을 요청할 때, 선택지를 주어 사용자가 더 쉽게 선택할 수 있도록 하십시오.
-        - 어떤 캐릭터든 등장시 create_character로 새로운 캐릭터를 생성하여 등장시키십시오.
-        - 어떤 캐릭터든 아이템을 얻으면, create_character_inventory_item 툴을 호출해 character_inventory에 아이템을 추가하십시오.
+        - 새로운 캐릭터가 등장한다면, 무조건 create_character로 새로운 캐릭터를 생성하여 등장시키십시오.
+        - 새로운 아이템을 얻으면, create_character_inventory_item 툴을 호출해 character_inventory에 아이템을 추가하십시오.
         - 이야기를 진행 한 후, 바로 insert_world_dialog 툴을 호출해 플레이어의 요청 토큰, 응답 토큰 모두 저장하십시오.
         - 이야기를 진행할 때, 기존에 생성했던 world_name에 속하는 character들을 계속 주시하며 낮은 빈도로 재등장시키는것이 권장됩니다.
         이는 스토리의 퀄리티를 높이기 위함입니다.
@@ -185,7 +185,7 @@ async def create_character(
 ) -> str:
     """
     world_name world에 속하는 character_name을 갖고 있는 캐릭터를 생성합니다.
-    어떤 캐릭터든 등장시 이 툴을 사용해 새로운 캐릭터를 생성하여 등장시키십시오.
+    새로운 캐릭터가 등장한다면, 무조건 이 툴을 사용해 새로운 캐릭터를 생성하여 등장시키십시오.
     캐릭터를 생성하기 전, divide_character_stat함수로 스탯을 결정하고 캐릭터성을 부여하십시오.
     해당 캐릭터의 성격과 특징을 characteristic에 상세하게 기재하십시오.
     캐릭터의 입체감을 위하여 해당 world_name에 속하는 world의 world_description을 참고하여
@@ -361,7 +361,7 @@ async def select_world_dialog(
         world_name: str,
 
         keyword: str
-):
+)-> str:
     """
     게임 이야기의 통일성을 위하여 이야기를 작성할 때 특정한 캐릭터 이름, 인벤토리 아이템, 키워드 등을 이 툴을 호출하여야만 합니다.
     1단어의 키워드를 검색해 관련된 이야기를 검색합니다.
@@ -373,12 +373,41 @@ async def select_world_dialog(
     with get_db_cursor() as cursor:
         conn = cursor.connection
 
-        for row in cursor.execute(text(
+        for row in cursor.execute(
             f"""
-            SELECT * FROM world_dialog 
-            WHERE world_name = ? 
-                AND id IN (SELECT rowid FROM chats_fts WHERE dialog MATCH '{keyword}*')
-            """), world_name
+                SELECT * FROM world_dialog
+                WHERE world_name = '{world_name}'
+                    AND id IN (
+                    SELECT rowid 
+                    FROM world_dialog_fts5 
+                    WHERE dialog 
+                    MATCH '{keyword}*')
+            """
+        ):
+            dialogs.append(row)
+
+    return json.dumps(dialogs)
+
+
+@mcp.tool()
+async def select_all_before_dialogs(
+        world_name: str
+)-> str:
+    """
+    게임을 이어하거나 불러올 때, 모든 이야기의 추적이 필요하다면 이 함수를 호출하십시오.
+    """
+
+    dialogs = []
+
+    with get_db_cursor() as cursor:
+        conn = cursor.connection
+
+        for row in cursor.execute(
+            f"""
+                SELECT * 
+                FROM world_dialog
+                WHERE world_name = '{world_name}'
+            """
         ):
             dialogs.append(row)
 
@@ -388,26 +417,31 @@ async def select_world_dialog(
 @mcp.tool()
 async def select_last_world_dialog(
         world_name: str
-):
+)-> str:
     """
-    게임을 불러온다면, 이 툴을 호출해 가장 마지막 dialog가 무엇이었는지 파악한 후 이야기를 이어가야만 합니다.
+    게임을 이어하기, 혹은 불러온다면, 가장 마지막 dialog가 무엇이었는지 파악한 후 이야기를 이어가야만 합니다.
     """
+
+    dialogs = []
 
     with get_db_cursor() as cursor:
         conn = cursor.connection
 
-        cursor.execute(text(
+        for row in cursor.execute(
             f"""
                 SELECT * FROM world_dialog 
-                WHERE world_name = ?
+                WHERE world_name = '{world_name}'
                 ORDER BY id DESC LIMIT 1
-            """), world_name).first()
+            """
+        ):
+            dialogs.append(row)
 
-    return
+
+    return json.dumps(dialogs)
 
 
 # endregion
 
 
 if __name__ == "__main__":
-    asyncio.run(mcp.run())
+    mcp.run()
